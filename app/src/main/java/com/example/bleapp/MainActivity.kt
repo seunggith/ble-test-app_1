@@ -13,7 +13,6 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.view.Gravity
 import android.widget.*
 import java.util.*
 
@@ -29,13 +28,27 @@ class MainActivity : Activity() {
     private lateinit var logScroll: ScrollView
     private lateinit var deviceListAdapter: ArrayAdapter<String>
     private val discoveredDevices = mutableListOf<BluetoothDevice>()
-    private lateinit var inputField: EditText
-    private lateinit var hexCheckBox: CheckBox
+
+    private lateinit var hexInputField: EditText
+    private lateinit var asciiInputField: EditText
+    private lateinit var crlfCheckBox: CheckBox
 
     private var isScanning = false
     private val handler = Handler(Looper.getMainLooper())
 
-    // 표준 CCCD UUID (실시간 데이터 수신 알림 활성화용)
+    // =========================================================================
+    // [Telink SPP 전용 UUID 3종 세팅] (리틀 엔디안 배열 -> 표준 UUID 변환 완료)
+    // =========================================================================
+    // 1. TELINK_SPP_UUID_SERVICE (0x10, 0x19...)
+    private val TELINK_SPP_SERVICE_UUID = UUID.fromString("00010203-0405-0607-0809-0a0b0c0d1910")
+
+    // 2. TELINK_SPP_DATA_SERVER2CLIENT (0x10, 0x2B...) -> 수신(Notify) 전용
+    private val TELINK_SPP_NOTIFY_UUID = UUID.fromString("00010203-0405-0607-0809-0a0b0c0d2b10")
+
+    // 3. TELINK_SPP_DATA_CLIENT2SERVER (0x11, 0x2B...) -> 송신(Write) 전용
+    private val TELINK_SPP_WRITE_UUID = UUID.fromString("00010203-0405-0607-0809-0a0b0c0d2b11")
+
+    // 표준 CCCD UUID (실시간 수신 알림 활성화 디스크립터)
     private val CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -51,14 +64,14 @@ class MainActivity : Activity() {
     private fun setupUI() {
         val rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(32, 32, 32, 32)
+            setPadding(28, 28, 28, 28)
         }
 
         statusText = TextView(this).apply {
             text = "상태: 대기 중 (권한을 허용해 주세요)"
-            textSize = 16f
+            textSize = 15f
             setTextColor(Color.BLACK)
-            setPadding(0, 0, 0, 16)
+            setPadding(0, 0, 0, 12)
         }
         rootLayout.addView(statusText)
 
@@ -67,7 +80,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
         }
         val scanBtn = Button(this).apply {
-            text = "BLE 스캔 시작"
+            text = "BLE 스캔"
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             setOnClickListener { startBleScan() }
         }
@@ -89,14 +102,14 @@ class MainActivity : Activity() {
         // 검색된 기기 목록
         val listLabel = TextView(this).apply {
             text = "▼ 검색된 기기 (터치하여 연결):"
-            setPadding(0, 16, 0, 8)
+            setPadding(0, 12, 0, 4)
         }
         rootLayout.addView(listLabel)
 
         deviceListAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, mutableListOf())
         val listView = ListView(this).apply {
             adapter = deviceListAdapter
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 380)
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 280)
             setBackgroundColor(Color.parseColor("#F2F2F2"))
             setOnItemClickListener { _, _, position, _ ->
                 val device = discoveredDevices[position]
@@ -105,38 +118,60 @@ class MainActivity : Activity() {
         }
         rootLayout.addView(listView)
 
-        // 데이터 전송 영역
-        val sendOptionLayout = LinearLayout(this).apply {
+        // 1. Hex 입력창 + 단독 전송 버튼
+        val hexRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 16, 0, 0)
+            setPadding(0, 12, 0, 0)
         }
-        hexCheckBox = CheckBox(this).apply {
-            text = "Hex 바이트로 전송 (예: 01 FF A0)"
-        }
-        sendOptionLayout.addView(hexCheckBox)
-        rootLayout.addView(sendOptionLayout)
-
-        val sendLayout = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 8, 0, 16)
-        }
-        inputField = EditText(this).apply {
-            hint = "보낼 데이터 입력"
+        hexInputField = EditText(this).apply {
+            hint = "Hex 입력 (예: 01 FF A0)"
+            setSingleLine(true)
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
-        val sendBtn = Button(this).apply {
-            text = "전송(Write)"
-            setOnClickListener { sendData(inputField.text.toString()) }
+        val sendHexBtn = Button(this).apply {
+            text = "Hex만 전송"
+            setOnClickListener { sendCombinedData(sendHex = true, sendAscii = false) }
         }
-        sendLayout.addView(inputField)
-        sendLayout.addView(sendBtn)
-        rootLayout.addView(sendLayout)
+        hexRow.addView(hexInputField)
+        hexRow.addView(sendHexBtn)
+        rootLayout.addView(hexRow)
+
+        // 2. ASCII 입력창 + 단독 전송 버튼
+        val asciiRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 4, 0, 0)
+        }
+        asciiInputField = EditText(this).apply {
+            hint = "ASCII 문자 입력 (예: AT+VER)"
+            setSingleLine(true)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val sendAsciiBtn = Button(this).apply {
+            text = "ASCII만 전송"
+            setOnClickListener { sendCombinedData(sendHex = false, sendAscii = true) }
+        }
+        asciiRow.addView(asciiInputField)
+        asciiRow.addView(sendAsciiBtn)
+        rootLayout.addView(asciiRow)
+
+        // 줄바꿈 옵션 및 [Hex + ASCII 동시 전송] 버튼
+        crlfCheckBox = CheckBox(this).apply {
+            text = "ASCII 끝에 줄바꿈(\\r\\n) 추가"
+            isChecked = false
+        }
+        rootLayout.addView(crlfCheckBox)
+
+        val sendBothBtn = Button(this).apply {
+            text = "★ Hex + ASCII 합쳐서 동시 전송 ★"
+            setBackgroundColor(Color.parseColor("#D0E8FF"))
+            setOnClickListener { sendCombinedData(sendHex = true, sendAscii = true) }
+        }
+        rootLayout.addView(sendBothBtn)
 
         // 실시간 통신 로그 영역
         val logLabel = TextView(this).apply {
-            text = "▼ 실시간 통신 로그 (수신/송신 내역):"
-            setPadding(0, 8, 0, 8)
+            text = "▼ 실시간 통신 로그 (ASCII + Hex 동시 표시):"
+            setPadding(0, 8, 0, 4)
         }
         rootLayout.addView(logLabel)
 
@@ -145,7 +180,10 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.parseColor("#1E1E1E"))
         }
         logText = TextView(this).apply {
-            text = "앱이 시작되었습니다.\n"
+            text = "[Telink SPP 전용 모드 준비 완료]\n" +
+                   "- Service: ...1910\n" +
+                   "- Notify(수신): ...2b10\n" +
+                   "- Write(송신): ...2b11\n\n"
             setTextColor(Color.parseColor("#00FF00"))
             textSize = 13f
             setPadding(20, 20, 20, 20)
@@ -167,6 +205,23 @@ class MainActivity : Activity() {
         handler.post { statusText.text = "상태: $msg" }
     }
 
+    private fun bytesToPrintableAscii(bytes: ByteArray): String {
+        val sb = StringBuilder()
+        for (b in bytes) {
+            val c = b.toInt() and 0xFF
+            if (c in 32..126) {
+                sb.append(c.toChar())
+            } else if (c == 10) {
+                sb.append("\\n")
+            } else if (c == 13) {
+                sb.append("\\r")
+            } else {
+                sb.append(".")
+            }
+        }
+        return sb.toString()
+    }
+
     private fun checkPermissions() {
         val perms = mutableListOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
@@ -180,14 +235,14 @@ class MainActivity : Activity() {
         if (missing.isNotEmpty()) {
             requestPermissions(missing.toTypedArray(), 100)
         } else {
-            updateStatus("준비 완료 (BLE 스캔 시작을 누르세요)")
+            updateStatus("준비 완료 (BLE 스캔을 누르세요)")
         }
     }
 
     private fun startBleScan() {
         val scanner = bluetoothAdapter?.bluetoothLeScanner
         if (scanner == null) {
-            appendLog("[오류] 스마트폰 블루투스가 꺼져있거나 지원하지 않습니다.")
+            appendLog("[오류] 블루투스가 꺼져있거나 지원하지 않습니다.")
             return
         }
         if (isScanning) return
@@ -195,7 +250,7 @@ class MainActivity : Activity() {
         discoveredDevices.clear()
         deviceListAdapter.clear()
         isScanning = true
-        updateStatus("주변 BLE 기기 검색 중... (5초간 진행)")
+        updateStatus("주변 기기 스캔 중... (5초)")
         appendLog("--- BLE 스캔 시작 ---")
 
         scanner.startScan(scanCallback)
@@ -229,7 +284,7 @@ class MainActivity : Activity() {
             isScanning = false
         }
         disconnectGatt()
-        updateStatus("연결 시도 중: ${device.name ?: device.address}")
+        updateStatus("연결 중: ${device.name ?: device.address}")
         appendLog("기기 연결 시도: ${device.address}")
         bluetoothGatt = device.connectGatt(this, false, gattCallback)
     }
@@ -248,45 +303,56 @@ class MainActivity : Activity() {
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                updateStatus("연결 성공! 서비스 탐색 중...")
-                appendLog("GATT 서버 연결됨. 내부 서비스 검색 시작...")
-                gatt.discoverServices()
+                updateStatus("연결 성공! MTU 확장 및 서비스 탐색 중...")
+                appendLog("GATT 서버 연결됨. 패킷 크기(MTU 512) 확장 요청...")
+                // 긴 패킷 송수신을 위해 MTU 확장 요청 후 서비스 탐색
+                if (!gatt.requestMtu(512)) {
+                    gatt.discoverServices()
+                }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 updateStatus("연결 끊김")
                 appendLog("기기와 연결이 끊어졌습니다.")
             }
         }
 
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            appendLog("MTU 크기 설정 완료: $mtu bytes -> 서비스 탐색 시작")
+            gatt.discoverServices()
+        }
+
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                appendLog("--- 발견된 서비스 및 특성 ---")
-                var foundWrite = false
-                for (service in gatt.services) {
-                    appendLog("[Service] ${service.uuid}")
-                    for (char in service.characteristics) {
-                        val props = char.properties
-                        // 데이터 쓰기(Write) 가능한 특성 자동 연결
-                        if ((props and (BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE)) != 0) {
-                            writeCharacteristic = char
-                            foundWrite = true
-                            appendLog("  └ [송신(Write) 연결됨] ${char.uuid}")
-                        }
-                        // 데이터 수신(Notify/Indicate) 가능한 특성 자동 구독
-                        if ((props and (BluetoothGattCharacteristic.PROPERTY_NOTIFY or BluetoothGattCharacteristic.PROPERTY_INDICATE)) != 0) {
-                            gatt.setCharacteristicNotification(char, true)
-                            val descriptor = char.getDescriptor(CCCD_UUID)
-                            if (descriptor != null) {
-                                descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                                gatt.writeDescriptor(descriptor)
-                            }
-                            appendLog("  └ [수신(Notify) 활성화] ${char.uuid}")
-                        }
+                val telinkService = gatt.getService(TELINK_SPP_SERVICE_UUID)
+                if (telinkService != null) {
+                    appendLog("★ [Telink SPP 서비스(1910) 연결 성공] ★")
+
+                    // 1. 송신(CLIENT2SERVER: 2b11) 특성 찾기
+                    val writeChar = telinkService.getCharacteristic(TELINK_SPP_WRITE_UUID)
+                    if (writeChar != null) {
+                        writeCharacteristic = writeChar
+                        appendLog("  └ [송신(Write: 2b11) 준비 완료]")
+                    } else {
+                        appendLog("  └ [경고] 2b11(Write) 특성을 찾지 못했습니다.")
                     }
-                }
-                if (foundWrite) {
-                    updateStatus("통신 준비 완료! 데이터를 보내보세요.")
+
+                    // 2. 수신(SERVER2CLIENT: 2b10) 특성 찾기 및 Notify 활성화
+                    val notifyChar = telinkService.getCharacteristic(TELINK_SPP_NOTIFY_UUID)
+                    if (notifyChar != null) {
+                        gatt.setCharacteristicNotification(notifyChar, true)
+                        val descriptor = notifyChar.getDescriptor(CCCD_UUID)
+                        if (descriptor != null) {
+                            descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                            gatt.writeDescriptor(descriptor)
+                        }
+                        appendLog("  └ [수신(Notify: 2b10) 구독 완료]")
+                    } else {
+                        appendLog("  └ [경고] 2b10(Notify) 특성을 찾지 못했습니다.")
+                    }
+
+                    updateStatus("Telink SPP 통신 준비 완료!")
                 } else {
-                    updateStatus("연결됨 (쓰기 가능한 특성을 찾지 못함)")
+                    appendLog("[오류] 기기에 Telink SPP 서비스(1910)가 없습니다.")
+                    updateStatus("연결됨 (Telink 서비스 없음)")
                 }
             }
         }
@@ -294,47 +360,79 @@ class MainActivity : Activity() {
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
             val data = characteristic.value
             if (data != null) {
-                val strMsg = String(data, Charsets.UTF_8)
+                val asciiMsg = bytesToPrintableAscii(data)
                 val hexMsg = data.joinToString(" ") { String.format("%02X", it) }
-                appendLog("[수신] 텍스트: $strMsg | Hex: $hexMsg")
+                appendLog("[수신(2b10)] (${data.size}B)\n  ASCII: \"$asciiMsg\"\n  Hex: [$hexMsg]")
             }
         }
 
         override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                appendLog("[송신 성공] 데이터가 전달되었습니다.")
-            } else {
-                appendLog("[송신 실패] 오류 코드: $status")
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                appendLog("[송신 오류] 상태 코드: $status")
             }
         }
     }
 
-    private fun sendData(input: String) {
+    private fun sendCombinedData(sendHex: Boolean, sendAscii: Boolean) {
         val char = writeCharacteristic
         val gatt = bluetoothGatt
         if (gatt == null || char == null) {
-            appendLog("[오류] 먼저 기기에 연결하거나 쓰기 가능한 특성이 있어야 합니다.")
+            appendLog("[오류] 먼저 Telink 기기에 연결해주세요.")
             return
         }
-        if (input.isEmpty()) return
 
-        val bytesToSend: ByteArray = try {
-            if (hexCheckBox.isChecked) {
-                // 공백이나 하이픈 제거 후 Hex 바이트 배열로 변환
-                val cleanHex = input.replace(" ", "").replace("-", "")
-                cleanHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-            } else {
-                input.toByteArray(Charsets.UTF_8)
+        var finalBytes = ByteArray(0)
+
+        // 1. Hex 입력값 처리
+        if (sendHex) {
+            val hexStr = hexInputField.text.toString().trim()
+            if (hexStr.isNotEmpty()) {
+                try {
+                    val cleanHex = hexStr.replace("0x", "", ignoreCase = true)
+                        .replace(" ", "")
+                        .replace(",", "")
+                        .replace("-", "")
+                    if (cleanHex.length % 2 != 0) {
+                        appendLog("[오류] Hex는 짝수 자리(2글자씩)로 입력해주세요. (예: 01 FF)")
+                        return
+                    }
+                    val hexBytes = cleanHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                    finalBytes += hexBytes
+                } catch (e: Exception) {
+                    appendLog("[오류] 잘못된 Hex 값입니다. (0~9, A~F만 가능)")
+                    return
+                }
             }
-        } catch (e: Exception) {
-            appendLog("[오류] 잘못된 Hex 형식입니다. (예: 01 FF A0 형태로 입력)")
+        }
+
+        // 2. ASCII 입력값 처리
+        if (sendAscii) {
+            val asciiStr = asciiInputField.text.toString()
+            if (asciiStr.isNotEmpty()) {
+                val textToSend = if (crlfCheckBox.isChecked) "$asciiStr\r\n" else asciiStr
+                val asciiBytes = textToSend.toByteArray(Charsets.UTF_8)
+                finalBytes += asciiBytes
+            }
+        }
+
+        if (finalBytes.isEmpty()) {
+            appendLog("[알림] 전송할 데이터를 입력해주세요.")
             return
         }
 
-        char.value = bytesToSend
+        // Telink SPP는 보통 Write No Response(빠른 전송)를 주로 사용하므로 우선 지원 시 설정
+        if ((char.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0) {
+            char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+        } else {
+            char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        }
+
+        char.value = finalBytes
         val success = gatt.writeCharacteristic(char)
-        val hexLog = bytesToSend.joinToString(" ") { String.format("%02X", it) }
-        appendLog("[송신 요청] $input (Hex: $hexLog) -> 요청결과: $success")
-        inputField.setText("")
+
+        val asciiLog = bytesToPrintableAscii(finalBytes)
+        val hexLog = finalBytes.joinToString(" ") { String.format("%02X", it) }
+
+        appendLog("[송신(2b11)] (${finalBytes.size}B) -> ${if (success) "성공" else "실패"}\n  ASCII: \"$asciiLog\"\n  Hex: [$hexLog]")
     }
 }
